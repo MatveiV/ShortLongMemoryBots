@@ -628,6 +628,11 @@ Chunk "1..*" -- UserDocs : doc_id
 stateDiagram-v2
     [*] --> ModeSelect : /start
 
+    state "Выбор режима" as ModeSelect
+    state "Короткая память\ndeque maxlen=10\n/new /config /info" as Short
+    state "Долгая память\nChromaDB RAG\n/docs /clear /config /info" as Long
+    state "Короткая + Долгая\ndeque + ChromaDB\n/new /docs /clear /config /info" as Combined
+
     ModeSelect --> Short : mode:short
     ModeSelect --> Long : mode:long
     ModeSelect --> Combined : mode:combined
@@ -635,11 +640,6 @@ stateDiagram-v2
     Short --> ModeSelect : /start
     Long --> ModeSelect : /start
     Combined --> ModeSelect : /start
-
-    note right of ModeSelect : Inline-кнопки выбора режима
-    note right of Short : deque maxlen=10\nКоманды: /new /config /info
-    note right of Long : ChromaDB RAG\nКоманды: /docs /clear /config /info
-    note right of Combined : deque + ChromaDB\nКоманды: /new /docs /clear /config /info
 ```
 
 <details>
