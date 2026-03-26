@@ -313,66 +313,35 @@ stop
 
 ---
 
-### Диаграмма 3: Поток обработки документа и вопроса — Долгая память
+### Диаграмма 3: Загрузка документа — Долгая память
 
 ```mermaid
 flowchart TD
-    subgraph DOC[Загрузка документа]
-        D1([Пользователь загружает файл]) --> D2[Скачать через Telegram API\naiohttp]
-        D2 --> D3[load_document → chunk_text\nsize=500 overlap=50]
-        D3 --> D4[embed_chunks\nembeddings.create model input=chunks]
-        D4 --> D5[(ChromaDB.upsert\nid embedding metadata document)]
-        D5 --> D6[Сообщить количество чанков]
-    end
-
-    subgraph QA[Ответ на вопрос]
-        Q1([Пользователь задаёт вопрос]) --> Q2[retrieve_context\nembeddings.create input=question]
-        Q2 --> Q3[(ChromaDB.query\ntop_k=5 where=user_id)]
-        Q3 --> Q4{Чанки найдены?}
-        Q4 -->|нет| Q5[Сообщить: загрузи документ]
-        Q4 -->|да| Q6["Payload: [system] + [контекст + вопрос]"]
-        Q6 --> Q7[chat.completions.create]
-        Q7 --> Q8[Отправить ответ]
-    end
+    D1(["Пользователь загружает файл"]) --> D2["Скачать через Telegram API / aiohttp"]
+    D2 --> D3["load_document → chunk_text / size=500 overlap=50"]
+    D3 --> D4["embed_chunks / embeddings.create model input=chunks"]
+    D4 --> D5[("ChromaDB.upsert / id embedding metadata document")]
+    D5 --> D6["Сообщить количество чанков"]
 ```
 
 <details>
 <summary>PlantUML</summary>
 
 ```plantuml
-@startuml long_memory_flow
+@startuml doc_upload
 !theme plain
 skinparam backgroundColor #FAFAFA
 
-title bot_long_memory.py — RAG Pipeline
+title bot_long_memory.py — Загрузка документа
 
-partition "Загрузка документа" {
-  start
-  :Пользователь загружает файл\n(PDF / TXT / DOCX);
-  :Скачать файл через Telegram API\n(aiohttp);
-  :load_document() → chunk_text()\nsize=500, overlap=50;
-  :embed_chunks()\nembeddings.create(model=embed_model, input=chunks);
-  :ChromaDB.upsert()\nid, embedding, metadata, document;
-  :Сообщить пользователю о количестве чанков;
-  stop
-}
-
-partition "Ответ на вопрос" {
-  start
-  :Пользователь задаёт вопрос;
-  :retrieve_context()\nembeddings.create(input=[question]);
-  :ChromaDB.query()\ntop_k=5, where={user_id};
-
-  if (Чанки найдены?) then (нет)
-    :Сообщить: "Загрузи документ";
-    stop
-  else (да)
-    :Сформировать prompt:\nsystem + [контекст] + вопрос;
-    :chat.completions.create();
-    :Отправить ответ пользователю;
-    stop
-  endif
-}
+start
+:Пользователь загружает файл\n(PDF / TXT / DOCX);
+:Скачать файл через Telegram API\n(aiohttp);
+:load_document() → chunk_text()\nsize=500, overlap=50;
+:embed_chunks()\nembeddings.create(model=embed_model, input=chunks);
+:ChromaDB.upsert()\nid, embedding, metadata, document;
+:Сообщить пользователю о количестве чанков;
+stop
 @enduml
 ```
 
@@ -380,7 +349,51 @@ partition "Ответ на вопрос" {
 
 ---
 
-### Диаграмма 4: Комбинированный пайплайн — Короткая + Долгая память
+### Диаграмма 4: Ответ на вопрос — Долгая память (RAG)
+
+```mermaid
+flowchart TD
+    Q1(["Пользователь задаёт вопрос"]) --> Q2["retrieve_context / embeddings.create input=question"]
+    Q2 --> Q3[("ChromaDB.query / top_k=5 where=user_id")]
+    Q3 --> Q4{"Чанки найдены?"}
+    Q4 -->|нет| Q5["Сообщить: загрузи документ"]
+    Q4 -->|да| Q6["Payload: system + контекст + вопрос"]
+    Q6 --> Q7["chat.completions.create"]
+    Q7 --> Q8["Отправить ответ"]
+```
+
+<details>
+<summary>PlantUML</summary>
+
+```plantuml
+@startuml doc_question
+!theme plain
+skinparam backgroundColor #FAFAFA
+
+title bot_long_memory.py — Ответ на вопрос (RAG)
+
+start
+:Пользователь задаёт вопрос;
+:retrieve_context()\nembeddings.create(input=[question]);
+:ChromaDB.query()\ntop_k=5, where={user_id};
+
+if (Чанки найдены?) then (нет)
+  :Сообщить: "Загрузи документ";
+  stop
+else (да)
+  :Сформировать prompt:\nsystem + [контекст] + вопрос;
+  :chat.completions.create();
+  :Отправить ответ пользователю;
+  stop
+endif
+@enduml
+```
+
+</details>
+
+---
+
+### Диаграмма 5: Комбинированный пайплайн — Короткая + Долгая память
 
 ```mermaid
 flowchart TD
@@ -468,7 +481,7 @@ stop
 
 ---
 
-### Диаграмма 5: FSM — Настройка /config
+### Диаграмма 6: FSM — Настройка /config
 
 ```mermaid
 stateDiagram-v2
@@ -535,7 +548,7 @@ end note
 
 ---
 
-### Диаграмма 6: Структура памяти в ChromaDB
+### Диаграмма 7: Структура памяти в ChromaDB
 
 ```mermaid
 classDiagram
@@ -622,7 +635,7 @@ Chunk "1..*" -- UserDocs : doc_id
 
 ---
 
-### Диаграмма 7: Выбор режима после /start
+### Диаграмма 8: Выбор режима после /start
 
 ```mermaid
 flowchart TD
