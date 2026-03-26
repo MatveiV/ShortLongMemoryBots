@@ -371,42 +371,32 @@ title FSM — /config (bot_shortlong_memory.py)
 
 [*] --> ProviderSelect : /config
 
-state "Выбор провайдера" as ProviderSelect {
-  : inline-кнопки\nZ.AI / ProxyAPI / GenAPI
-}
+state "Выбор провайдера" as ProviderSelect
+state "Выбор модели" as ModelSelect
+state "waiting_temperature" as Temp
+state "waiting_max_tokens" as Tokens
+state "waiting_embed_model" as Embed
+state "Сохранено" as Done
 
-state "Выбор модели" as ModelSelect {
-  : inline-кнопки\nсписок моделей провайдера
-}
-
-state "waiting_temperature" as Temp {
-  : текстовый ввод\nfloat в диапазоне модели
-}
-
-state "waiting_max_tokens" as Tokens {
-  : inline-кнопки или\nтекстовый ввод
-}
-
-state "waiting_embed_model" as Embed {
-  : inline-кнопки\nмодели эмбеддингов\n(только long/combined)
-}
-
-state "Сохранено" as Done {
-  : user_settings[uid] обновлён
-}
+note right of ProviderSelect : inline-кнопки\nZ.AI / ProxyAPI / GenAPI
+note right of ModelSelect : inline-кнопки\nсписок моделей провайдера
+note right of Temp : текстовый ввод\nfloat в диапазоне модели
+note right of Tokens : inline-кнопки или\nтекстовый ввод
+note right of Embed : inline-кнопки\nмодели эмбеддингов\n(только long/combined)
+note right of Done : user_settings[uid] обновлён
 
 ProviderSelect --> ModelSelect : prov:* callback
 ModelSelect --> Temp : model:* callback
-ModelSelect --> ProviderSelect : ◀ Назад
+ModelSelect --> ProviderSelect : Назад
 Temp --> Tokens : валидный float
 Tokens --> Embed : tokens:* callback
 Tokens --> Embed : ручной ввод
 Embed --> Done : embed:* callback
 Done --> [*]
 
-note right of Embed
+note bottom of Tokens
   bot_short_memory.py:
-  Tokens → Done (без шага Embed)
+  Tokens --> Done (без шага Embed)
 end note
 @enduml
 ```
@@ -478,35 +468,23 @@ title bot_shortlong_memory.py — Выбор режима
 
 [*] --> Start : /start
 
-state Start {
-  : Показать inline-кнопки\nвыбора режима
-}
+state "Выбор режима" as Start
+state "Короткая память" as Short
+state "Долгая память" as Long
+state "Короткая + Долгая" as Combined
 
-state "💬 Короткая память" as Short {
-  : deque(maxlen=10)\nтолько история диалога
-  --
-  Команды: /new /config /info
-}
-
-state "📚 Долгая память" as Long {
-  : ChromaDB RAG\nтолько по документам
-  --
-  Команды: /docs /clear /config /info
-}
-
-state "🧠 Короткая + Долгая" as Combined {
-  : deque + ChromaDB\nистория + документы
-  --
-  Команды: /new /docs /clear /config /info
-}
+note right of Start : Показать inline-кнопки\nвыбора режима
+note right of Short : deque(maxlen=10)\nтолько история диалога\nКоманды: /new /config /info
+note right of Long : ChromaDB RAG\nтолько по документам\nКоманды: /docs /clear /config /info
+note right of Combined : deque + ChromaDB\nистория + документы\nКоманды: /new /docs /clear /config /info
 
 Start --> Short    : mode:short
 Start --> Long     : mode:long
 Start --> Combined : mode:combined
 
-Short    --> Start : /start (смена режима)
-Long     --> Start : /start (смена режима)
-Combined --> Start : /start (смена режима)
+Short    --> Start : /start
+Long     --> Start : /start
+Combined --> Start : /start
 @enduml
 ```
 
