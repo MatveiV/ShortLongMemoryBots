@@ -171,9 +171,36 @@ ChromaDB (./memory/) — persistent vector store
 
 ---
 
-## Диаграммы PlantUML
+## Диаграммы
+
+> Mermaid-версии рендерятся прямо на GitHub. PlantUML-версии можно использовать локально или через [plantuml.com](https://www.plantuml.com/plantuml/uml/).
 
 ### Диаграмма 1: Архитектура системы
+
+```mermaid
+graph TD
+    User([Пользователь]) -->|сообщение / файл| TG[Telegram Bot API]
+    TG -->|polling| AIOGRAM[aiogram 3.x\nRouter / Dispatcher]
+
+    AIOGRAM -->|/config| FSM[FSM ConfigStates]
+    AIOGRAM --> SETTINGS[User Settings\nDict uid→dict]
+    AIOGRAM --> DEQUE[deque maxlen=10\nКороткая память]
+    AIOGRAM --> PARSER[Document Parser\nPDF / TXT / DOCX]
+    PARSER --> EMBED[Embeddings API]
+    EMBED --> CHROMA[(ChromaDB\n./memory/)]
+    AIOGRAM -->|query top-K| CHROMA
+    AIOGRAM --> LLM[Chat Completions]
+
+    LLM --> ZAI[Z.AI\napi.z.ai]
+    LLM --> PROXY[ProxyAPI\napi.proxyapi.ru]
+    LLM --> GEN[GenAPI\nproxy.gen-api.ru]
+    EMBED --> ZAI
+    EMBED --> PROXY
+    EMBED --> GEN
+```
+
+<details>
+<summary>PlantUML</summary>
 
 ```plantuml
 @startuml architecture
@@ -229,9 +256,27 @@ EMBED --> GEN
 @enduml
 ```
 
+</details>
+
 ---
 
 ### Диаграмма 2: Поток обработки сообщения — Короткая память
+
+```mermaid
+flowchart TD
+    A([Пользователь отправляет текст]) --> B[get_settings uid]
+    B --> C[short_memory uid .append role:user]
+    C --> D["Payload: [system] + list(deque) + [user]"]
+    D --> E[chat.completions.create]
+    E --> F{Ошибка API?}
+    F -->|да| G[Удалить из deque\nОтправить ошибку]
+    F -->|нет| H[Получить ответ модели]
+    H --> I[Отправить ответ пользователю]
+    I --> J[short_memory uid .append role:assistant]
+```
+
+<details>
+<summary>PlantUML</summary>
 
 ```plantuml
 @startuml short_memory_flow
@@ -264,9 +309,35 @@ stop
 @enduml
 ```
 
+</details>
+
 ---
 
 ### Диаграмма 3: Поток обработки документа и вопроса — Долгая память
+
+```mermaid
+flowchart TD
+    subgraph DOC[Загрузка документа]
+        D1([Пользователь загружает файл]) --> D2[Скачать через Telegram API\naiohttp]
+        D2 --> D3[load_document → chunk_text\nsize=500 overlap=50]
+        D3 --> D4[embed_chunks\nembeddings.create model input=chunks]
+        D4 --> D5[(ChromaDB.upsert\nid embedding metadata document)]
+        D5 --> D6[Сообщить количество чанков]
+    end
+
+    subgraph QA[Ответ на вопрос]
+        Q1([Пользователь задаёт вопрос]) --> Q2[retrieve_context\nembeddings.create input=question]
+        Q2 --> Q3[(ChromaDB.query\ntop_k=5 where=user_id)]
+        Q3 --> Q4{Чанки найдены?}
+        Q4 -->|нет| Q5[Сообщить: загрузи документ]
+        Q4 -->|да| Q6["Payload: [system] + [контекст + вопрос]"]
+        Q6 --> Q7[chat.completions.create]
+        Q7 --> Q8[Отправить ответ]
+    end
+```
+
+<details>
+<summary>PlantUML</summary>
 
 ```plantuml
 @startuml long_memory_flow
@@ -305,9 +376,44 @@ partition "Ответ на вопрос" {
 @enduml
 ```
 
+</details>
+
 ---
 
 ### Диаграмма 4: Комбинированный пайплайн — Короткая + Долгая память
+
+```mermaid
+flowchart TD
+    A([Пользователь отправляет текст]) --> B{Режим?}
+
+    B -->|MODE_SHORT| S1[Добавить в deque]
+    S1 --> S2["Payload: [system] + history + [user]"]
+    S2 --> S3[chat.completions.create]
+    S3 --> S4[Добавить ответ в deque]
+
+    B -->|MODE_LONG| L1[(retrieve_context → ChromaDB)]
+    L1 --> L2{Контекст найден?}
+    L2 -->|нет| L3[Сообщить об отсутствии документов]
+    L2 -->|да| L4["Payload: [system] + [контекст + вопрос]"]
+    L4 --> L5[chat.completions.create]
+
+    B -->|MODE_COMBINED| C1[Добавить в deque]
+    C1 --> C2[(retrieve_context → ChromaDB)]
+    C2 --> C3{Контекст найден?}
+    C3 -->|да| C4["user_content = контекст + вопрос"]
+    C3 -->|нет| C5[user_content = вопрос]
+    C4 --> C6["Payload: [system] + history + [user_content]"]
+    C5 --> C6
+    C6 --> C7[chat.completions.create]
+    C7 --> C8[Добавить ответ в deque]
+
+    S4 --> END([Отправить ответ])
+    L5 --> END
+    C8 --> END
+```
+
+<details>
+<summary>PlantUML</summary>
 
 ```plantuml
 @startuml combined_flow
@@ -358,9 +464,33 @@ stop
 @enduml
 ```
 
+</details>
+
 ---
 
 ### Диаграмма 5: FSM — Настройка /config
+
+```mermaid
+stateDiagram-v2
+    [*] --> ProviderSelect : /config
+    ProviderSelect --> ModelSelect : prov callback
+    ModelSelect --> ProviderSelect : Назад
+    ModelSelect --> Temp : model callback
+    Temp --> Tokens : валидный float
+    Tokens --> Embed : tokens callback / ручной ввод
+    Embed --> Done : embed callback
+    Done --> [*]
+
+    note right of ProviderSelect : inline-кнопки\nZ.AI / ProxyAPI / GenAPI
+    note right of ModelSelect : список моделей провайдера
+    note right of Temp : float в диапазоне модели
+    note right of Tokens : кнопки или ручной ввод
+    note right of Embed : только для long и combined\nbot_short_memory - этот шаг пропускается
+    note right of Done : user_settings обновлён
+```
+
+<details>
+<summary>PlantUML</summary>
 
 ```plantuml
 @startuml fsm_config
@@ -401,9 +531,42 @@ end note
 @enduml
 ```
 
+</details>
+
 ---
 
 ### Диаграмма 6: Структура памяти в ChromaDB
+
+```mermaid
+classDiagram
+    class Chunk {
+        +id: uid:doc_id:chunk_index
+        +document: str ~500 символов
+        +embedding: List~float~
+        +metadata_user_id: str
+        +metadata_doc_id: str
+        +metadata_chunk_index: int
+    }
+
+    class UserDocs {
+        +user_id: int
+        +doc_id: str
+        +filename: str
+        +chunks: int
+    }
+
+    class ShortMemory {
+        +user_id: int
+        +role: user | assistant
+        +content: str
+        +maxlen: 10
+    }
+
+    Chunk "1..*" --> UserDocs : doc_id
+```
+
+<details>
+<summary>PlantUML</summary>
 
 ```plantuml
 @startuml chroma_structure
@@ -455,9 +618,32 @@ Chunk "1..*" -- UserDocs : doc_id
 @enduml
 ```
 
+</details>
+
 ---
 
 ### Диаграмма 7: Выбор режима после /start
+
+```mermaid
+stateDiagram-v2
+    [*] --> ModeSelect : /start
+
+    ModeSelect --> Short : mode:short
+    ModeSelect --> Long : mode:long
+    ModeSelect --> Combined : mode:combined
+
+    Short --> ModeSelect : /start
+    Long --> ModeSelect : /start
+    Combined --> ModeSelect : /start
+
+    note right of ModeSelect : Inline-кнопки выбора режима
+    note right of Short : deque maxlen=10\nКоманды: /new /config /info
+    note right of Long : ChromaDB RAG\nКоманды: /docs /clear /config /info
+    note right of Combined : deque + ChromaDB\nКоманды: /new /docs /clear /config /info
+```
+
+<details>
+<summary>PlantUML</summary>
 
 ```plantuml
 @startuml mode_selection
@@ -487,6 +673,8 @@ Long     --> Start : /start
 Combined --> Start : /start
 @enduml
 ```
+
+</details>
 
 ---
 
