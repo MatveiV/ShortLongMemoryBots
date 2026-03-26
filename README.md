@@ -179,21 +179,21 @@ ChromaDB (./memory/) — persistent vector store
 
 ```mermaid
 graph TD
-    User([Пользователь]) -->|сообщение / файл| TG[Telegram Bot API]
-    TG -->|polling| AIOGRAM[aiogram 3.x\nRouter / Dispatcher]
+    User(["Пользователь"]) -->|"сообщение / файл"| TG["Telegram Bot API"]
+    TG -->|polling| AIOGRAM["aiogram 3.x / Router / Dispatcher"]
 
-    AIOGRAM -->|/config| FSM[FSM ConfigStates]
-    AIOGRAM --> SETTINGS[User Settings\nDict uid→dict]
-    AIOGRAM --> DEQUE[deque maxlen=10\nКороткая память]
-    AIOGRAM --> PARSER[Document Parser\nPDF / TXT / DOCX]
-    PARSER --> EMBED[Embeddings API]
-    EMBED --> CHROMA[(ChromaDB\n./memory/)]
-    AIOGRAM -->|query top-K| CHROMA
-    AIOGRAM --> LLM[Chat Completions]
+    AIOGRAM -->|"/config"| FSM["FSM ConfigStates"]
+    AIOGRAM --> SETTINGS["User Settings"]
+    AIOGRAM --> DEQUE["deque maxlen=10 / Короткая память"]
+    AIOGRAM --> PARSER["Document Parser PDF/TXT/DOCX"]
+    PARSER --> EMBED["Embeddings API"]
+    EMBED --> CHROMA[("ChromaDB ./memory/")]
+    AIOGRAM -->|"query top-K"| CHROMA
+    AIOGRAM --> LLM["Chat Completions"]
 
-    LLM --> ZAI[Z.AI\napi.z.ai]
-    LLM --> PROXY[ProxyAPI\napi.proxyapi.ru]
-    LLM --> GEN[GenAPI\nproxy.gen-api.ru]
+    LLM --> ZAI["Z.AI"]
+    LLM --> PROXY["ProxyAPI"]
+    LLM --> GEN["GenAPI"]
     EMBED --> ZAI
     EMBED --> PROXY
     EMBED --> GEN
