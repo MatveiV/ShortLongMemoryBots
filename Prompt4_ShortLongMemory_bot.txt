@@ -1,0 +1,332 @@
+Объедини эти два проекта: @bot_short_memory.py и @bot_long_memory.py  и сделай бота и с длинной, и с короткой памятями: @bot_shortlong_memory.py
+
+Такой бот сможет:
+работать с загруженными документами (долгая память);
+вести осмысленный диалог, помня историю общения (короткая память);
+давать точные ответы на основе фактов и поддерживать естественную беседу.
+Именно к созданию таких универсальных ассистентов мы и стремимся.
+
+Пример код для бота и с длинной, и с короткой памятями
+import asyncio
+import os
+import logging
+import uuid
+from pathlib import Path
+from typing import Deque, Dict, List, Optional, TypedDict
+from collections import defaultdict, deque
+
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import Message, Document
+from aiogram.filters import CommandStart
+from aiogram.enums.parse_mode import ParseMode
+from aiogram.client.default import DefaultBotProperties
+
+from openai import OpenAI
+import chromadb
+
+# Опциональная загрузка .env
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+
+# Опциональные зависимости для парсинга документов
+try:
+    from pypdf import PdfReader  # type: ignore
+except Exception:
+    PdfReader = None
+
+try:
+    import docx  # python-docx
+except Exception:
+    docx = None
+
+
+# -----------------------------
+# Константы и настройки
+# -----------------------------
+PERSIST_DIR = "./memory"  # ChromaDB persistent storage
+UPLOADS_DIR = "./uploads"  # путь для загруженных файлов
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 50
+SHORT_MEMORY_SIZE = 10  # кол-во последних сообщений на пользователя
+
+
+class ChatMessage(TypedDict):
+    role: str  # "system" | "user" | "assistant"
+    content: str
+
+
+# Память в оперативке: user_id -> последние N сообщений (user/assistant)
+short_memory: Dict[int, Deque[ChatMessage]] = defaultdict(lambda: deque(maxlen=SHORT_MEMORY_SIZE))
+
+router = Router()
+
+
+def require_env(var_name: str) -> str:
+    value = os.getenv(var_name)
+    if not value:
+        raise RuntimeError(f"Требуется переменная окружения {var_name}")
+    return value
+
+
+def ensure_dirs() -> None:
+    Path(PERSIST_DIR).mkdir(parents=True, exist_ok=True)
+    Path(UPLOADS_DIR).mkdir(parents=True, exist_ok=True)
+
+
+# -----------------------------
+# Вспомогательные: чанкинг и загрузка документов
+# -----------------------------
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
+    if not text:
+        return []
+    chunks: List[str] = []
+    start = 0
+    text_len = len(text)
+    while start < text_len:
+        end = min(start + chunk_size, text_len)
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end == text_len:
+            break
+        start = max(0, end - overlap)
+    return chunks
+
+
+def load_document(file_path: str) -> List[str]:
+    """Загружает документ (PDF/TXT/DOCX) и возвращает список чанков текста."""
+    path = Path(file_path)
+    suffix = path.suffix.lower()
+    text = ""
+
+    if suffix == ".txt":
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    elif suffix == ".pdf":
+        if PdfReader is None:
+            raise RuntimeError("Для PDF требуется пакет pypdf. Установите: pip install pypdf")
+        reader = PdfReader(str(path))
+        pages = []
+        for page in reader.pages:
+            try:
+                pages.append(page.extract_text() or "")
+            except Exception:
+                pages.append("")
+        text = "\n".join(pages)
+    elif suffix in (".docx", ".doc"):
+        if docx is None:
+            raise RuntimeError("Для DOCX требуется пакет python-docx. Установите: pip install python-docx")
+        document = docx.Document(str(path))
+        text = "\n".join(p.text for p in document.paragraphs)
+    else:
+        raise RuntimeError("Поддерживаются только PDF, TXT, DOCX")
+
+    return chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP)
+
+
+# -----------------------------
+# Chroma + OpenAI Embeddings
+# -----------------------------
+def get_chroma_collection() -> "chromadb.api.models.Collection.Collection":
+    client = chromadb.PersistentClient(path=PERSIST_DIR)
+    return client.get_or_create_collection(name="long_memory", metadata={"hnsw:space": "cosine"})
+
+
+def embed_texts(client: OpenAI, texts: List[str]) -> List[List[float]]:
+    if not texts:
+        return []
+    resp = client.embeddings.create(model=os.getenv("EMBED_MODEL", "text-embedding-3-small"), input=texts)
+    return [d.embedding for d in resp.data]
+
+
+def embed_chunks(client: OpenAI, user_id: int, doc_id: str, chunks: List[str]) -> int:
+    if not chunks:
+        return 0
+    collection = get_chroma_collection()
+    vectors = embed_texts(client, chunks)
+    ids = [f"{user_id}:{doc_id}:{i}:{uuid.uuid4().hex}" for i in range(len(chunks))]
+    metadatas = [{"user_id": str(user_id), "doc_id": doc_id, "chunk_index": i} for i in range(len(chunks))]
+    collection.upsert(ids=ids, embeddings=vectors, metadatas=metadatas, documents=chunks)
+    return len(chunks)
+
+
+def retrieve_context(client: OpenAI, user_id: int, question: str, top_k: int = 5, doc_id: Optional[str] = None) -> List[str]:
+    collection = get_chroma_collection()
+    q_emb = embed_texts(client, [question])[0]
+    where: Dict[str, object] = {"user_id": str(user_id)}
+    if doc_id:
+        where["doc_id"] = doc_id
+    result = collection.query(query_embeddings=[q_emb], n_results=top_k, where=where)
+    docs = result.get("documents") or []
+    return docs[0] if docs else []
+
+
+# -----------------------------
+# Объединённое формирование ответа (RAG + короткая память)
+# -----------------------------
+async def answer_with_memory(
+    client: OpenAI,
+    user_id: int,
+    user_text: str,
+    rag_top_k: int = 5,
+) -> str:
+    # Получаем контекст из векторной БД
+    context_chunks = []
+    try:
+        context_chunks = retrieve_context(client, user_id, user_text, top_k=rag_top_k)
+    except Exception:
+        logging.exception("RAG retrieve failed")
+
+    # Системная инструкция: использовать контекст, но можно дополнять короткой историей
+    system_prompt: ChatMessage = {
+        "role": "system",
+        "content": (
+            "Ты — помощник. Если есть контекст документа — отвечай прежде всего на его основе. "
+            "Если контекста недостаточно, используй историю диалога и общие знания. "
+            "Не выдумывай факты о документе, если в контексте их нет."
+        ),
+    }
+
+    context_text = "\n\n".join(f"Фрагмент {i+1}:\n{c}" for i, c in enumerate(context_chunks))
+
+    # Короткая история пользователя
+    history = list(short_memory[user_id])
+
+    # Сообщение пользователя с явным указанием контекста (если найден)
+    user_message_content = (
+        f"Контекст из документа:\n{context_text}\n\nВопрос: {user_text}" if context_chunks else user_text
+    )
+
+    messages: List[ChatMessage] = [system_prompt, *history, {"role": "user", "content": user_message_content}]
+
+    completion = await asyncio.to_thread(
+        client.chat.completions.create,
+        model=os.getenv("CHAT_MODEL", os.getenv("MODEL", "gpt-3.5-turbo")),
+        messages=messages,
+        temperature=0.3,
+        max_tokens=700,
+    )
+    return completion.choices[0].message.content or ""
+
+
+# -----------------------------
+# Хендлеры бота
+# -----------------------------
+@router.message(CommandStart())
+async def on_start(message: Message) -> None:
+    await message.answer(
+        "Я бот с короткой и длинной памятью.\n"
+        "- Отправьте PDF/TXT/DOCX — я сохраню его во векторной базе (долгая память).\n"
+        "- Пишите сообщения — я учитываю последние 10 реплик (короткая память).\n"
+        "- На вопросы отвечаю, используя контекст документа и историю."
+    )
+
+
+@router.message(F.document)
+async def on_document(message: Message, bot: Bot) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    doc: Document = message.document
+
+    try:
+        openai_api_key = require_env("OPENAI_API_KEY")
+    except RuntimeError as e:
+        await message.answer(str(e))
+        return
+
+    os.environ["OPENAI_API_KEY"] = openai_api_key
+    client = OpenAI()
+
+    ensure_dirs()
+    user_dir = Path(UPLOADS_DIR) / str(user_id)
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    file_name = doc.file_name or f"file_{uuid.uuid4().hex}"
+    save_path = user_dir / file_name
+
+    # Скачиваем файл
+    try:
+        file_info = await bot.get_file(doc.file_id)
+        file_url = f"https://api.telegram.org/file/bot{bot.token}/{file_info.file_path}"
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url) as resp:
+                resp.raise_for_status()
+                data = await resp.read()
+        save_path.write_bytes(data)
+    except Exception:
+        logging.exception("File download error")
+        await message.answer("Не удалось скачать файл. Попробуйте ещё раз.")
+        return
+
+    # Индексируем документ
+    try:
+        chunks = load_document(str(save_path))
+    except Exception as e:
+        await message.answer(str(e))
+        return
+
+    if not chunks:
+        await message.answer("Не удалось извлечь текст из документа.")
+        return
+
+    doc_id = uuid.uuid4().hex
+    try:
+        count = embed_chunks(client, user_id, doc_id, chunks)
+    except Exception:
+        logging.exception("Embedding/Chroma error")
+        await message.answer("Ошибка при сохранении в векторную базу.")
+        return
+
+    await message.answer(f"Документ сохранён и проиндексирован. Чанков: {count}. Теперь задайте вопрос.")
+
+
+@router.message(F.text & ~F.via_bot)
+async def on_text(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    user_text = message.text or ""
+
+    try:
+        openai_api_key = require_env("OPENAI_API_KEY")
+    except RuntimeError as e:
+        await message.answer(str(e))
+        return
+
+    os.environ["OPENAI_API_KEY"] = openai_api_key
+    client = OpenAI()
+
+    # Обновляем короткую память: добавляем вход пользователя
+    short_memory[user_id].append({"role": "user", "content": user_text})
+
+    try:
+        reply = await answer_with_memory(client, user_id, user_text)
+    except Exception:
+        logging.exception("Chat completion error")
+        await message.answer("Не удалось получить ответ от модели. Попробуйте позже.")
+        return
+
+    await message.answer(reply)
+
+    # Добавляем ответ ассистента в короткую память
+    short_memory[user_id].append({"role": "assistant", "content": reply})
+
+
+async def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    ensure_dirs()
+
+    bot_token = require_env("BOT_TOKEN")
+    bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher()
+    dp.include_router(router)
+
+    logging.info("Бот с короткой и длинной памятью запущен. Ожидаю сообщения...")
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass

@@ -1,0 +1,173 @@
+# TASK
+Создай Python-скрипт Telegram-бота с короткой памятью (history buffer), используя:
+aiogram 3.x
+OpenAI ChatCompletion API (gpt-4 или gpt-3.5)
+Память хранится в оперативке (dict user_id -> последние N сообщений)
+
+#Initial setup
+Скрипт должен подключать openai или любой совместимый LLM (gpt-4, gpt-3.5, llama 3 и т.д.), который получен через AI-провайдера, так же как это сделано в скриптах ai_direct.py и openai_client.py с теми же api-ключами как и в файле .env.
+
+# BOT LOGIC
+0. Пользователь выбирает ai-провайдера, модель, температуру, токены из доступных.
+1. Пользователь пишет сообщение.
+2. Бот хранит последние 10 сообщений диалога для каждого user_id.
+3. Перед ответом бот отправляет модели:
+- Историю диалога (короткую память)
+- Текущее сообщение
+4. Модель генерирует ответ.
+5. Ответ отправляется пользователю и добавляется в историю.
+
+# REQUIREMENTS
+- Токен Telegram берётся из текущего файла ENV: BOT_TOKEN
+- Ключ OpenAI берётся из текущего ENV для ai-провайдера: OPENAI_API_KEY
+- aiogram 3.x (не использовать aiogram 2)
+- Асинхронные обработчики
+- Код должен быть полностью рабочим и запускаться сразу
+
+# OUTPUT
+Верни один файл: bot_short_memory.py
+С понятными комментариями в коде и документацией.
+
+#Пример бота с короткой памятью:
+
+import asyncio
+import os
+import logging
+from collections import defaultdict, deque
+from typing import Deque, Dict, List, TypedDict
+
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import Message
+from aiogram.filters import CommandStart
+from aiogram.enums.parse_mode import ParseMode
+
+# OpenAI официальная SDK (Chat Completions)
+from openai import OpenAI
+
+
+# -----------------------------
+# Константы и настройки
+# -----------------------------
+MAX_HISTORY_MESSAGES = 10  # хранить последние N сообщений (и пользователя, и бота)
+
+
+class ChatMessage(TypedDict):
+    role: str  # "system" | "user" | "assistant"
+    content: str
+
+
+# Память в оперативке: user_id -> кольцевая очередь последних сообщений
+memory: Dict[int, Deque[ChatMessage]] = defaultdict(lambda: deque(maxlen=MAX_HISTORY_MESSAGES))
+
+
+# Маршрутизатор aiogram 3.x
+router = Router()
+
+
+def require_env(var_name: str) -> str:
+    value = os.getenv(var_name)
+    if not value:
+        raise RuntimeError(f"Требуется переменная окружения {var_name}")
+    return value
+
+
+def build_messages_for_openai(user_id: int, user_text: str) -> List[ChatMessage]:
+    """Формируем массив сообщений для Chat Completions.
+
+    Включаем короткую память (историю) и текущее сообщение пользователя.
+    Можно добавить системную роль для стиля ответов.
+    """
+    history = list(memory[user_id])  # уже обрезанная до MAX_HISTORY_MESSAGES
+
+    system_prompt: ChatMessage = {
+        "role": "system",
+        "content": (
+            "Ты — дружелюбный и лаконичный помощник. Отвечай по делу."
+        ),
+    }
+
+    return [system_prompt, *history, {"role": "user", "content": user_text}]
+
+
+async def generate_reply(client: OpenAI, model: str, messages: List[ChatMessage]) -> str:
+    """Запрашиваем ответ у OpenAI Chat Completions."""
+    completion = await asyncio.to_thread(
+        client.chat.completions.create,
+        model=model,
+        messages=messages,
+        temperature=0.7,
+        max_tokens=500,
+    )
+    return completion.choices[0].message.content or ""
+
+
+@router.message(CommandStart())
+async def on_start(message: Message) -> None:
+    """Обработчик /start."""
+    await message.answer(
+        "Привет! Я бот с короткой памятью. Напиши мне сообщение — я запомню контекст последних 10 реплик."
+    )
+
+
+@router.message(F.text)
+async def on_text(message: Message, bot: Bot) -> None:
+    """Основной обработчик текстовых сообщений."""
+    user_id = message.from_user.id if message.from_user else 0
+    user_text = message.text or ""
+
+    # Читаем необходимые ENV-переменные
+    try:
+        openai_api_key = require_env("OPENAI_API_KEY")
+    except RuntimeError as e:
+        await message.answer(str(e))
+        return
+
+    # Инициализируем OpenAI клиент (SDK использует ключ из ENV)
+    os.environ["OPENAI_API_KEY"] = openai_api_key
+    client = OpenAI()
+
+    # Выбираем модель (можно переопределить через ENV MODEL)
+    model = os.getenv("MODEL", "gpt-3.5-turbo")  # допускается gpt-4 или gpt-3.5
+
+    # Обновляем память: добавляем сообщение пользователя
+    memory[user_id].append({"role": "user", "content": user_text})
+
+    # Строим вход для Chat Completions: короткая память + текущее сообщение
+    messages_payload = build_messages_for_openai(user_id, user_text)
+
+    try:
+        reply_text = await generate_reply(client, model, messages_payload)
+    except Exception as e:  # на случай сетевых/квотных ошибок
+        logging.exception("OpenAI error")
+        await message.answer("Не удалось получить ответ от модели. Попробуйте ещё раз позже.")
+        return
+
+    # Отправляем ответ пользователю
+    await message.answer(reply_text)
+
+    # Добавляем ответ ассистента в память
+    memory[user_id].append({"role": "assistant", "content": reply_text})
+
+
+async def main() -> None:
+    # Логирование
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    # Читаем токен бота из ENV
+    bot_token = require_env("BOT_TOKEN")
+
+    # Создаём бота и диспетчер
+    bot = Bot(token=bot_token, parse_mode=ParseMode.HTML)
+    dp = Dispatcher()
+    dp.include_router(router)
+
+    # Стартуем лонг-поллинг
+    logging.info("Бот запущен. Ожидаю сообщения...")
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
