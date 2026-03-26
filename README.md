@@ -625,21 +625,16 @@ Chunk "1..*" -- UserDocs : doc_id
 ### Диаграмма 7: Выбор режима после /start
 
 ```mermaid
-stateDiagram-v2
-    [*] --> ModeSelect : /start
+flowchart TD
+    START([/start]) --> MS[Выбор режима\nInline-кнопки]
 
-    state "Выбор режима" as ModeSelect
-    state "Короткая память\ndeque maxlen=10\n/new /config /info" as Short
-    state "Долгая память\nChromaDB RAG\n/docs /clear /config /info" as Long
-    state "Короткая + Долгая\ndeque + ChromaDB\n/new /docs /clear /config /info" as Combined
+    MS -->|mode:short| S[Короткая память\ndeque maxlen=10\n/new /config /info]
+    MS -->|mode:long| L[Долгая память\nChromaDB RAG\n/docs /clear /config /info]
+    MS -->|mode:combined| C[Короткая + Долгая\ndeque + ChromaDB\n/new /docs /clear /config /info]
 
-    ModeSelect --> Short : mode:short
-    ModeSelect --> Long : mode:long
-    ModeSelect --> Combined : mode:combined
-
-    Short --> ModeSelect : /start
-    Long --> ModeSelect : /start
-    Combined --> ModeSelect : /start
+    S -->|/start| MS
+    L -->|/start| MS
+    C -->|/start| MS
 ```
 
 <details>
